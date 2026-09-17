@@ -68,7 +68,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Vulkan SDK
-        run: choco install vulkan-sdk -y
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y
+          $vkPath = (Get-ChildItem -Path "C:\VulkanSDK", "C:\Program Files\VulkanSDK", "C:\Tools\VulkanSDK" -ErrorAction SilentlyContinue | Select-Object -Last 1).FullName
+          if ($vkPath) {
+            Add-Content $env:GITHUB_ENV "VULKAN_SDK=$vkPath"
+            Add-Content $env:GITHUB_PATH "$vkPath\bin"
+            Write-Host "Configured VULKAN_SDK=$vkPath"
+          }
 
       - name: Build with CMake
         run: |
