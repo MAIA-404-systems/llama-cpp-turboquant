@@ -1,0 +1,328 @@
+name: Build and Release llama-server Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CMAKE_COMMON_ARGS: "-DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF"
+
+jobs:
+  windows-cuda:
+    name: Build Windows CUDA
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit 12.4
+        uses: ./.github/actions/windows-setup-cuda
+        with:
+          cuda_version: '12.4'
+
+      - name: Install Ninja
+        run: choco install ninja
+
+      - name: Build with CMake
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_CUDA=ON ^
+            -DGGML_CUDA_FA_ALL_QUANTS=ON ^
+            ${{ env.CMAKE_COMMON_ARGS }}
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      - name: Package Windows CUDA Binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist
+          Copy-Item build\bin\Release\llama-server.exe dist\
+          $dst = '.\dist\'
+          robocopy "$env:CUDA_PATH\bin" $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
+          robocopy "$env:CUDA_PATH\lib" $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
+          robocopy "$env:CUDA_PATH\bin\x64" $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
+          Compress-Archive -Path dist\* -DestinationPath llama-server-${{ github.ref_name }}-windows-x64-cuda12.4.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-cuda
+          path: llama-server-${{ github.ref_name }}-windows-x64-cuda12.4.zip
+
+  windows-vulkan:
+    name: Build Windows Vulkan
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Vulkan SDK
+        uses: humalect/setup-vulkan-sdk@v1
+        with:
+          vulkan-query-version: 1.3.268.0
+          vulkan-components: Vulkan-Headers, Vulkan-Loader
+
+      - name: Build with CMake
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF -DGGML_VULKAN=ON -DGGML_VULKAN_SHADERS_GEN=OFF ${{ env.CMAKE_COMMON_ARGS }}
+          cmake --build build --config Release --target llama-server -j 4
+
+      - name: Package Windows Vulkan Binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist
+          Copy-Item build\bin\Release\llama-server.exe dist\
+          Compress-Archive -Path dist\* -DestinationPath llama-server-${{ github.ref_name }}-windows-x64-vulkan.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-vulkan
+          path: llama-server-${{ github.ref_name }}-windows-x64-vulkan.zip
+
+  windows-cpu:
+    name: Build Windows CPU
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build with CMake
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF ${{ env.CMAKE_COMMON_ARGS }}
+          cmake --build build --config Release --target llama-server -j 4
+
+      - name: Package Windows CPU Binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist
+          Copy-Item build\bin\Release\llama-server.exe dist\
+          Compress-Archive -Path dist\* -DestinationPath llama-server-${{ github.ref_name }}-windows-x64-cpu.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-cpu
+          path: llama-server-${{ github.ref_name }}-windows-x64-cpu.zip
+
+  linux-cuda:
+    name: Build Linux CUDA
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: '12.4.1'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libssl-dev
+
+      - name: Build with CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CUDA=ON \
+            -DGGML_CUDA_FA_ALL_QUANTS=ON \
+            ${{ env.CMAKE_COMMON_ARGS }}
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Package Linux CUDA Binary
+        run: |
+          mkdir -p dist
+          cp build/bin/llama-server dist/
+          tar -czvf llama-server-${{ github.ref_name }}-linux-x64-cuda12.4.tar.gz -C dist .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-cuda
+          path: llama-server-${{ github.ref_name }}-linux-x64-cuda12.4.tar.gz
+
+  linux-vulkan:
+    name: Build Linux Vulkan
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential mesa-vulkan-drivers vulkan-sdk libssl-dev cmake
+
+      - name: Build with CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DGGML_VULKAN=ON \
+            ${{ env.CMAKE_COMMON_ARGS }}
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Package Linux Vulkan Binary
+        run: |
+          mkdir -p dist
+          cp build/bin/llama-server dist/
+          tar -czvf llama-server-${{ github.ref_name }}-linux-x64-vulkan.tar.gz -C dist .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-vulkan
+          path: llama-server-${{ github.ref_name }}-linux-x64-vulkan.tar.gz
+
+  linux-cpu:
+    name: Build Linux CPU
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libssl-dev
+
+      - name: Build with CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            ${{ env.CMAKE_COMMON_ARGS }}
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Package Linux CPU Binary
+        run: |
+          mkdir -p dist
+          cp build/bin/llama-server dist/
+          tar -czvf llama-server-${{ github.ref_name }}-linux-x64-cpu.tar.gz -C dist .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-cpu
+          path: llama-server-${{ github.ref_name }}-linux-x64-cpu.tar.gz
+
+  macos-metal:
+    name: Build macOS Metal
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build with CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_RPATH='@loader_path' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            ${{ env.CMAKE_COMMON_ARGS }}
+          cmake --build build --config Release -j $(sysctl -n hw.logicalcpu)
+
+      - name: Package macOS Metal Binary
+        run: |
+          mkdir -p dist
+          cp build/bin/llama-server dist/
+          tar -czvf llama-server-${{ github.ref_name }}-macos-arm64-metal.tar.gz -C dist .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-metal
+          path: llama-server-${{ github.ref_name }}-macos-arm64-metal.tar.gz
+
+  macos-vulkan:
+    name: Build macOS Vulkan
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Vulkan dependencies
+        run: |
+          brew install vulkan-headers vulkan-loader molten-vk glslang
+
+      - name: Build with CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_RPATH='@loader_path' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DGGML_VULKAN=ON \
+            ${{ env.CMAKE_COMMON_ARGS }}
+          cmake --build build --config Release -j $(sysctl -n hw.logicalcpu)
+
+      - name: Package macOS Vulkan Binary
+        run: |
+          mkdir -p dist
+          cp build/bin/llama-server dist/
+          tar -czvf llama-server-${{ github.ref_name }}-macos-arm64-vulkan.tar.gz -C dist .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-vulkan
+          path: llama-server-${{ github.ref_name }}-macos-arm64-vulkan.tar.gz
+
+  release:
+    name: Release Binaries
+    needs:
+      - windows-cuda
+      - windows-vulkan
+      - windows-cpu
+      - linux-cuda
+      - linux-vulkan
+      - linux-cpu
+      - macos-metal
+      - macos-vulkan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./dist-release
+          merge-multiple: true
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./dist-release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
