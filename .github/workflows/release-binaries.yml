@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - '[0-9]+.*'
   workflow_dispatch:
 
 permissions:
@@ -11,7 +12,7 @@ permissions:
 
 env:
   CMAKE_COMMON_ARGS: "-DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF"
-  VULKAN_VERSION_WIN: "1.3.296.0"
+  VULKAN_VERSION_WIN: "1.4.357.0"
 
 jobs:
   windows-cuda:
@@ -39,6 +40,7 @@ jobs:
             -DGGML_CUDA=ON ^
             -DGGML_CUDA_FA_ALL_QUANTS=ON ^
             -DGGML_CUDA_CUB_3DOT2=ON ^
+            -DCMAKE_CUDA_FLAGS="-Xcudafe --diag_suppress=221" ^
             ${{ env.CMAKE_COMMON_ARGS }}
           set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
           cmake --build build --config Release -j %NINJA_JOBS%
@@ -72,17 +74,16 @@ jobs:
       - name: Install Vulkan SDK
         shell: pwsh
         run: |
-          choco install vulkan-sdk -y
-          $vkPath = (Get-ChildItem -Path "C:\VulkanSDK", "C:\Program Files\VulkanSDK", "C:\Tools\VulkanSDK" -ErrorAction SilentlyContinue | Select-Object -Last 1).FullName
-          if ($vkPath) {
-            Add-Content $env:GITHUB_ENV "VULKAN_SDK=$vkPath"
-            Add-Content $env:GITHUB_PATH "$vkPath\bin"
-            Write-Host "Configured VULKAN_SDK=$vkPath"
-          }
+          curl.exe -o $env:RUNNER_TEMP\VulkanSDK-Installer.exe -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION_WIN}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION_WIN}.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+          $vkPath = "C:\VulkanSDK\${env:VULKAN_VERSION_WIN}"
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=$vkPath"
+          Add-Content $env:GITHUB_PATH "$vkPath\bin"
+          Write-Host "Configured VULKAN_SDK=$vkPath"
 
       - name: Build with CMake
         run: |
-          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF -DGGML_VULKAN=ON -DGGML_VULKAN_SHADERS_GEN=OFF ${{ env.CMAKE_COMMON_ARGS }}
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF -DGGML_VULKAN=ON ${{ env.CMAKE_COMMON_ARGS }}
           cmake --build build --config Release --target llama-server -j 4
 
       - name: Package Windows Vulkan Binary
@@ -293,7 +294,6 @@ jobs:
             -DCMAKE_INSTALL_RPATH='@loader_path' \
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
             -DGGML_VULKAN=ON \
-            -DGGML_VULKAN_SHADERS_GEN=OFF \
             ${{ env.CMAKE_COMMON_ARGS }}
           cmake --build build --config Release -j $(sysctl -n hw.logicalcpu)
 
