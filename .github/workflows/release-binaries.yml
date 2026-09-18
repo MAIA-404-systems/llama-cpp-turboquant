@@ -50,10 +50,12 @@ jobs:
           New-Item -ItemType Directory -Path dist
           Copy-Item build\bin\Release\llama-server.exe dist\
           $dst = '.\dist\'
-          robocopy "$env:CUDA_PATH\bin" $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
-          robocopy "$env:CUDA_PATH\lib" $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
-          robocopy "$env:CUDA_PATH\bin\x64" $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
-          if ($LASTEXITCODE -le 7) { $global:LASTEXITCODE = 0 }
+          foreach ($dir in @("$env:CUDA_PATH\bin", "$env:CUDA_PATH\lib", "$env:CUDA_PATH\bin\x64")) {
+            if (Test-Path $dir) {
+              robocopy $dir $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
+              if ($LASTEXITCODE -le 7) { $global:LASTEXITCODE = 0 }
+            }
+          }
           Compress-Archive -Path dist\* -DestinationPath llama-server-${{ github.ref_name }}-windows-x64-cuda12.4.zip
 
       - name: Upload Artifact
