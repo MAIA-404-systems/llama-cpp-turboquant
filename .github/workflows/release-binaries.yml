@@ -71,8 +71,11 @@ jobs:
             }
           }
           Remove-Item -Path dist\*.log -ErrorAction SilentlyContinue
-          foreach ($name in @('llama-server.exe', 'cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll', 'nvJitLink.dll')) {
+          foreach ($name in @('llama-server.exe', 'cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll')) {
             if (-not (Test-Path (Join-Path dist $name))) { throw "Missing CUDA release dependency: $name" }
+          }
+          if (-not (Get-ChildItem -Path dist -Filter 'nvJitLink*.dll' -File)) {
+            throw 'Missing CUDA release dependency: nvJitLink*.dll'
           }
           $oldPath = $env:PATH
           try {
