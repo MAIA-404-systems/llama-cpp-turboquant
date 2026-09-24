@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - master
+      - feature/turboquant-kv-cache
     paths: [
       '.github/workflows/build-cuda-ubuntu.yml',
       '**/CMakeLists.txt',

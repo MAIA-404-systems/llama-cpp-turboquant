@@ -4,11 +4,14 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - master
+      - feature/turboquant-kv-cache
   workflow_dispatch:
     inputs:
       release_tag:
         description: Existing release tag to rebuild (CUDA asset only)
-        required: true
+        required: false
         type: string
 
 permissions:
