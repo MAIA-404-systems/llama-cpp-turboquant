@@ -60,14 +60,14 @@ jobs:
           Copy-Item build\bin\Release\llama-server.exe dist\
           Get-ChildItem build\bin\Release -Filter *.dll -File | Copy-Item -Destination dist\
           $dst = '.\dist\'
-          foreach ($dir in @("$env:CUDA_PATH\bin", "$env:CUDA_PATH\lib", "$env:CUDA_PATH\bin\x64")) {
+          foreach ($dir in @("$env:CUDA_PATH\bin", "$env:CUDA_PATH\lib", "$env:CUDA_PATH\bin\x64", "$env:CUDA_PATH\lib\x64")) {
             if (Test-Path $dir) {
-              robocopy $dir $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
+              robocopy $dir $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll nvJitLink*.dll
               if ($LASTEXITCODE -le 7) { $global:LASTEXITCODE = 0 }
             }
           }
           Remove-Item -Path dist\*.log -ErrorAction SilentlyContinue
-          foreach ($name in @('llama-server.exe', 'cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll')) {
+          foreach ($name in @('llama-server.exe', 'cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll', 'nvJitLink.dll')) {
             if (-not (Test-Path (Join-Path dist $name))) { throw "Missing CUDA release dependency: $name" }
           }
           $oldPath = $env:PATH
@@ -164,12 +164,14 @@ jobs:
 
   linux-cuda:
     name: Build Linux CUDA
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.21
@@ -205,14 +207,19 @@ jobs:
             test -n "$source"
             cp -L "$source" "dist/$name"
           done
-          env -u LD_LIBRARY_PATH ./dist/llama-server --version
-          tar -czvf llama-server-${{ github.ref_name }}-linux-x64-cuda12.4.tar.gz -C dist .
+          # GitHub's CUDA runner has no driver; use the toolkit stub for this version check.
+          driver_stub=$(find "$cuda_root" -path '*/stubs/libcuda.so' -print -quit)
+          test -n "$driver_stub"
+          mkdir -p "$RUNNER_TEMP/cuda-driver-stub"
+          ln -sf "$driver_stub" "$RUNNER_TEMP/cuda-driver-stub/libcuda.so.1"
+          env LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-driver-stub" ./dist/llama-server --version
+          tar -czvf llama-server-${{ env.RELEASE_TAG }}-linux-x64-cuda12.4.tar.gz -C dist .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-x64-cuda
-          path: llama-server-${{ github.ref_name }}-linux-x64-cuda12.4.tar.gz
+          path: llama-server-${{ env.RELEASE_TAG }}-linux-x64-cuda12.4.tar.gz
 
   linux-vulkan:
     name: Build Linux Vulkan
@@ -431,6 +438,37 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: ./dist-release/*-windows-x64-cuda12.4.zip
+          fail_on_unmatched_files: true
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  repair-linux-cuda:
+    name: Replace Linux CUDA Release Asset
+    if: github.event_name == 'workflow_dispatch'
+    needs: linux-cuda
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Linux CUDA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x64-cuda
+          path: ./dist-release
+
+      - name: Verify existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName')" = "$RELEASE_TAG"
+
+      - name: Replace CUDA asset in existing release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: ./dist-release/*-linux-x64-cuda12.4.tar.gz
           fail_on_unmatched_files: true
           overwrite_files: true
         env:
