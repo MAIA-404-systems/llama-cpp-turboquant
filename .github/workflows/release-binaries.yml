@@ -21,6 +21,7 @@ env:
   CMAKE_COMMON_ARGS: "-DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_BORINGSSL=ON"
   VULKAN_VERSION_WIN: "1.4.357.0"
   RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+  ARTIFACT_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || github.sha }}
 
 jobs:
   windows-cuda:
@@ -85,17 +86,17 @@ jobs:
           } finally {
             $env:PATH = $oldPath
           }
-          Compress-Archive -Path dist\* -DestinationPath "llama-server-$env:RELEASE_TAG-windows-x64-cuda12.4.zip"
+          Compress-Archive -Path dist\* -DestinationPath "llama-server-$env:ARTIFACT_TAG-windows-x64-cuda12.4.zip"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-x64-cuda
-          path: llama-server-${{ env.RELEASE_TAG }}-windows-x64-cuda12.4.zip
+          path: llama-server-${{ env.ARTIFACT_TAG }}-windows-x64-cuda12.4.zip
 
   windows-vulkan:
     name: Build Windows Vulkan
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: windows-2022
 
     steps:
@@ -126,17 +127,17 @@ jobs:
           Get-ChildItem build\bin\Release -Filter *.dll -File | Copy-Item -Destination dist\
           & .\dist\llama-server.exe --version
           if ($LASTEXITCODE -ne 0) { throw "Packaged Vulkan server exited with $LASTEXITCODE" }
-          Compress-Archive -Path dist\* -DestinationPath llama-server-${{ github.ref_name }}-windows-x64-vulkan.zip
+          Compress-Archive -Path dist\* -DestinationPath llama-server-${{ env.ARTIFACT_TAG }}-windows-x64-vulkan.zip
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-x64-vulkan
-          path: llama-server-${{ github.ref_name }}-windows-x64-vulkan.zip
+          path: llama-server-${{ env.ARTIFACT_TAG }}-windows-x64-vulkan.zip
 
   windows-cpu:
     name: Build Windows CPU
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: windows-2022
 
     steps:
@@ -157,13 +158,13 @@ jobs:
           Get-ChildItem build\bin\Release -Filter *.dll -File | Copy-Item -Destination dist\
           & .\dist\llama-server.exe --version
           if ($LASTEXITCODE -ne 0) { throw "Packaged CPU server exited with $LASTEXITCODE" }
-          Compress-Archive -Path dist\* -DestinationPath llama-server-${{ github.ref_name }}-windows-x64-cpu.zip
+          Compress-Archive -Path dist\* -DestinationPath llama-server-${{ env.ARTIFACT_TAG }}-windows-x64-cpu.zip
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-x64-cpu
-          path: llama-server-${{ github.ref_name }}-windows-x64-cpu.zip
+          path: llama-server-${{ env.ARTIFACT_TAG }}-windows-x64-cpu.zip
 
   linux-cuda:
     name: Build Linux CUDA
@@ -216,17 +217,17 @@ jobs:
           mkdir -p "$RUNNER_TEMP/cuda-driver-stub"
           ln -sf "$driver_stub" "$RUNNER_TEMP/cuda-driver-stub/libcuda.so.1"
           env LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-driver-stub" ./dist/llama-server --version
-          tar -czvf llama-server-${{ env.RELEASE_TAG }}-linux-x64-cuda12.4.tar.gz -C dist .
+          tar -czvf llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-cuda12.4.tar.gz -C dist .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-x64-cuda
-          path: llama-server-${{ env.RELEASE_TAG }}-linux-x64-cuda12.4.tar.gz
+          path: llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-cuda12.4.tar.gz
 
   linux-vulkan:
     name: Build Linux Vulkan
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-22.04
 
     steps:
@@ -260,17 +261,17 @@ jobs:
           find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \;
           env -u LD_LIBRARY_PATH ./dist/llama-server --version
           env -u LD_LIBRARY_PATH ./dist/llama-server --list-devices
-          tar -czvf llama-server-${{ github.ref_name }}-linux-x64-vulkan.tar.gz -C dist .
+          tar -czvf llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-vulkan.tar.gz -C dist .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-x64-vulkan
-          path: llama-server-${{ github.ref_name }}-linux-x64-vulkan.tar.gz
+          path: llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-vulkan.tar.gz
 
   linux-cpu:
     name: Build Linux CPU
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-22.04
 
     steps:
@@ -301,17 +302,17 @@ jobs:
           find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \;
           env -u LD_LIBRARY_PATH ./dist/llama-server --version
           env -u LD_LIBRARY_PATH ./dist/llama-server --list-devices
-          tar -czvf llama-server-${{ github.ref_name }}-linux-x64-cpu.tar.gz -C dist .
+          tar -czvf llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-cpu.tar.gz -C dist .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-x64-cpu
-          path: llama-server-${{ github.ref_name }}-linux-x64-cpu.tar.gz
+          path: llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-cpu.tar.gz
 
   macos-metal:
     name: Build macOS Metal
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: macos-14
 
     steps:
@@ -336,17 +337,17 @@ jobs:
           cp build/bin/llama-server dist/
           find build/bin -maxdepth 1 -name '*.dylib' -exec cp -L {} dist/ \;
           ./dist/llama-server --version
-          tar -czvf llama-server-${{ github.ref_name }}-macos-arm64-metal.tar.gz -C dist .
+          tar -czvf llama-server-${{ env.ARTIFACT_TAG }}-macos-arm64-metal.tar.gz -C dist .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm64-metal
-          path: llama-server-${{ github.ref_name }}-macos-arm64-metal.tar.gz
+          path: llama-server-${{ env.ARTIFACT_TAG }}-macos-arm64-metal.tar.gz
 
   macos-vulkan:
     name: Build macOS Vulkan
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: macos-14
 
     steps:
@@ -374,17 +375,17 @@ jobs:
           cp build/bin/llama-server dist/
           find build/bin -maxdepth 1 -name '*.dylib' -exec cp -L {} dist/ \;
           ./dist/llama-server --version
-          tar -czvf llama-server-${{ github.ref_name }}-macos-arm64-vulkan.tar.gz -C dist .
+          tar -czvf llama-server-${{ env.ARTIFACT_TAG }}-macos-arm64-vulkan.tar.gz -C dist .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm64-vulkan
-          path: llama-server-${{ github.ref_name }}-macos-arm64-vulkan.tar.gz
+          path: llama-server-${{ env.ARTIFACT_TAG }}-macos-arm64-vulkan.tar.gz
 
   release:
     name: Release Binaries
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs:
       - windows-cuda
       - windows-vulkan
@@ -417,7 +418,7 @@ jobs:
 
   repair-windows-cuda:
     name: Replace Windows CUDA Release Asset
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
     needs: windows-cuda
     runs-on: ubuntu-latest
     permissions:
@@ -448,7 +449,7 @@ jobs:
 
   repair-linux-cuda:
     name: Replace Linux CUDA Release Asset
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
     needs: linux-cuda
     runs-on: ubuntu-latest
     permissions:

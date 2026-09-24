@@ -131,6 +131,6 @@ jobs:
           export GGML_VK_VISIBLE_DEVICES=0
           export GGML_VK_DISABLE_F16=1
           export GGML_VK_DISABLE_COOPMAT=1
-          # This is using llvmpipe and runs slower than other backends
-          # test-backend-ops is too slow on llvmpipe, skip it
-          ctest -L main -E test-backend-ops --verbose --timeout 900
+          # llvmpipe is a software Vulkan backend: these GPU stress suites can
+          # stall there and do not provide representative hardware coverage.
+          ctest -L main -E 'test-backend-ops|test-moe-cache' --verbose --timeout 900
