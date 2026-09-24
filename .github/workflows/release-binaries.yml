@@ -5,13 +5,19 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to rebuild (CUDA asset only)
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 env:
-  CMAKE_COMMON_ARGS: "-DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF"
+  CMAKE_COMMON_ARGS: "-DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_BORINGSSL=ON"
   VULKAN_VERSION_WIN: "1.4.357.0"
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 jobs:
   windows-cuda:
@@ -21,6 +27,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install CUDA Toolkit 12.4
         uses: ./.github/actions/windows-setup-cuda
@@ -35,6 +43,7 @@ jobs:
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
           cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DBUILD_SHARED_LIBS=OFF ^
             -DGGML_NATIVE=OFF ^
             -DGGML_CUDA=ON ^
             -DGGML_CUDA_FA_ALL_QUANTS=ON ^
@@ -49,6 +58,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist
           Copy-Item build\bin\Release\llama-server.exe dist\
+          Get-ChildItem build\bin\Release -Filter *.dll -File | Copy-Item -Destination dist\
           $dst = '.\dist\'
           foreach ($dir in @("$env:CUDA_PATH\bin", "$env:CUDA_PATH\lib", "$env:CUDA_PATH\bin\x64")) {
             if (Test-Path $dir) {
@@ -57,16 +67,32 @@ jobs:
             }
           }
           Remove-Item -Path dist\*.log -ErrorAction SilentlyContinue
-          Compress-Archive -Path dist\* -DestinationPath llama-server-${{ github.ref_name }}-windows-x64-cuda12.4.zip
+          foreach ($name in @('llama-server.exe', 'cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll')) {
+            if (-not (Test-Path (Join-Path dist $name))) { throw "Missing CUDA release dependency: $name" }
+          }
+          $oldPath = $env:PATH
+          try {
+            $env:PATH = "$((Resolve-Path dist).Path);$env:SystemRoot\System32;$env:SystemRoot"
+            $server = Start-Process -FilePath (Resolve-Path dist\llama-server.exe).Path -ArgumentList '--version' -PassThru -NoNewWindow
+            if (-not $server.WaitForExit(20000)) {
+              $server.Kill()
+              throw 'Packaged CUDA server timed out during --version'
+            }
+            if ($server.ExitCode -ne 0) { throw "Packaged CUDA server exited with $($server.ExitCode) during --version" }
+          } finally {
+            $env:PATH = $oldPath
+          }
+          Compress-Archive -Path dist\* -DestinationPath "llama-server-$env:RELEASE_TAG-windows-x64-cuda12.4.zip"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-x64-cuda
-          path: llama-server-${{ github.ref_name }}-windows-x64-cuda12.4.zip
+          path: llama-server-${{ env.RELEASE_TAG }}-windows-x64-cuda12.4.zip
 
   windows-vulkan:
     name: Build Windows Vulkan
+    if: github.event_name == 'push'
     runs-on: windows-2022
 
     steps:
@@ -90,9 +116,13 @@ jobs:
 
       - name: Package Windows Vulkan Binary
         shell: pwsh
+        timeout-minutes: 1
         run: |
           New-Item -ItemType Directory -Path dist
           Copy-Item build\bin\Release\llama-server.exe dist\
+          Get-ChildItem build\bin\Release -Filter *.dll -File | Copy-Item -Destination dist\
+          & .\dist\llama-server.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Vulkan server exited with $LASTEXITCODE" }
           Compress-Archive -Path dist\* -DestinationPath llama-server-${{ github.ref_name }}-windows-x64-vulkan.zip
 
       - name: Upload Artifact
@@ -103,6 +133,7 @@ jobs:
 
   windows-cpu:
     name: Build Windows CPU
+    if: github.event_name == 'push'
     runs-on: windows-2022
 
     steps:
@@ -116,9 +147,13 @@ jobs:
 
       - name: Package Windows CPU Binary
         shell: pwsh
+        timeout-minutes: 1
         run: |
           New-Item -ItemType Directory -Path dist
           Copy-Item build\bin\Release\llama-server.exe dist\
+          Get-ChildItem build\bin\Release -Filter *.dll -File | Copy-Item -Destination dist\
+          & .\dist\llama-server.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "Packaged CPU server exited with $LASTEXITCODE" }
           Compress-Archive -Path dist\* -DestinationPath llama-server-${{ github.ref_name }}-windows-x64-cpu.zip
 
       - name: Upload Artifact
@@ -129,6 +164,7 @@ jobs:
 
   linux-cuda:
     name: Build Linux CUDA
+    if: github.event_name == 'push'
     runs-on: ubuntu-22.04
 
     steps:
@@ -149,6 +185,7 @@ jobs:
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_INSTALL_RPATH='$ORIGIN' \
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
             -DGGML_NATIVE=OFF \
@@ -161,6 +198,14 @@ jobs:
         run: |
           mkdir -p dist
           cp build/bin/llama-server dist/
+          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \;
+          cuda_root=$(realpath "$CUDA_PATH")
+          for name in libcudart.so.12 libcublas.so.12 libcublasLt.so.12; do
+            source=$(find "$cuda_root" -path '*/stubs' -prune -o -name "$name" -print -quit)
+            test -n "$source"
+            cp -L "$source" "dist/$name"
+          done
+          env -u LD_LIBRARY_PATH ./dist/llama-server --version
           tar -czvf llama-server-${{ github.ref_name }}-linux-x64-cuda12.4.tar.gz -C dist .
 
       - name: Upload Artifact
@@ -171,6 +216,7 @@ jobs:
 
   linux-vulkan:
     name: Build Linux Vulkan
+    if: github.event_name == 'push'
     runs-on: ubuntu-22.04
 
     steps:
@@ -201,6 +247,9 @@ jobs:
         run: |
           mkdir -p dist
           cp build/bin/llama-server dist/
+          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \;
+          env -u LD_LIBRARY_PATH ./dist/llama-server --version
+          env -u LD_LIBRARY_PATH ./dist/llama-server --list-devices
           tar -czvf llama-server-${{ github.ref_name }}-linux-x64-vulkan.tar.gz -C dist .
 
       - name: Upload Artifact
@@ -211,6 +260,7 @@ jobs:
 
   linux-cpu:
     name: Build Linux CPU
+    if: github.event_name == 'push'
     runs-on: ubuntu-22.04
 
     steps:
@@ -238,6 +288,9 @@ jobs:
         run: |
           mkdir -p dist
           cp build/bin/llama-server dist/
+          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \;
+          env -u LD_LIBRARY_PATH ./dist/llama-server --version
+          env -u LD_LIBRARY_PATH ./dist/llama-server --list-devices
           tar -czvf llama-server-${{ github.ref_name }}-linux-x64-cpu.tar.gz -C dist .
 
       - name: Upload Artifact
@@ -248,6 +301,7 @@ jobs:
 
   macos-metal:
     name: Build macOS Metal
+    if: github.event_name == 'push'
     runs-on: macos-14
 
     steps:
@@ -258,6 +312,7 @@ jobs:
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_INSTALL_RPATH='@loader_path' \
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
             -DGGML_METAL=ON \
@@ -269,6 +324,8 @@ jobs:
         run: |
           mkdir -p dist
           cp build/bin/llama-server dist/
+          find build/bin -maxdepth 1 -name '*.dylib' -exec cp -L {} dist/ \;
+          ./dist/llama-server --version
           tar -czvf llama-server-${{ github.ref_name }}-macos-arm64-metal.tar.gz -C dist .
 
       - name: Upload Artifact
@@ -279,6 +336,7 @@ jobs:
 
   macos-vulkan:
     name: Build macOS Vulkan
+    if: github.event_name == 'push'
     runs-on: macos-14
 
     steps:
@@ -293,6 +351,7 @@ jobs:
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_INSTALL_RPATH='@loader_path' \
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
             -DGGML_VULKAN=ON \
@@ -303,6 +362,8 @@ jobs:
         run: |
           mkdir -p dist
           cp build/bin/llama-server dist/
+          find build/bin -maxdepth 1 -name '*.dylib' -exec cp -L {} dist/ \;
+          ./dist/llama-server --version
           tar -czvf llama-server-${{ github.ref_name }}-macos-arm64-vulkan.tar.gz -C dist .
 
       - name: Upload Artifact
@@ -313,6 +374,7 @@ jobs:
 
   release:
     name: Release Binaries
+    if: github.event_name == 'push'
     needs:
       - windows-cuda
       - windows-vulkan
@@ -339,5 +401,37 @@ jobs:
           files: |
             ./dist-release/*.zip
             ./dist-release/*.tar.gz
+          overwrite: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  repair-windows-cuda:
+    name: Replace Windows CUDA Release Asset
+    if: github.event_name == 'workflow_dispatch'
+    needs: windows-cuda
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows CUDA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-x64-cuda
+          path: ./dist-release
+
+      - name: Verify existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName')" = "$RELEASE_TAG"
+
+      - name: Replace CUDA asset in existing release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: ./dist-release/*-windows-x64-cuda12.4.zip
+          fail_on_unmatched_files: true
+          overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
