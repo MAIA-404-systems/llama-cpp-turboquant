@@ -64,10 +64,12 @@ jobs:
           Copy-Item build\bin\Release\llama-server.exe dist\
           Get-ChildItem build\bin\Release -Filter *.dll -File | Copy-Item -Destination dist\
           $dst = '.\dist\'
-          foreach ($dir in @("$env:CUDA_PATH\bin", "$env:CUDA_PATH\lib", "$env:CUDA_PATH\bin\x64", "$env:CUDA_PATH\lib\x64")) {
+          $cudaDirs = @("$env:CUDA_PATH\bin", "$env:CUDA_PATH\lib", "$env:CUDA_PATH\bin\x64", "$env:CUDA_PATH\lib\x64")
+          foreach ($dir in $cudaDirs) {
             if (Test-Path $dir) {
-              robocopy $dir $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll nvJitLink*.dll
-              if ($LASTEXITCODE -le 7) { $global:LASTEXITCODE = 0 }
+              robocopy $dir $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll nvJitLink*.dll nvrtc*.dll nvfatbin*.dll
+              if ($LASTEXITCODE -gt 7) { throw "CUDA DLL copy failed from $dir (robocopy exit $LASTEXITCODE)" }
+              $global:LASTEXITCODE = 0
             }
           }
           Remove-Item -Path dist\*.log -ErrorAction SilentlyContinue
@@ -77,17 +79,62 @@ jobs:
           if (-not (Get-ChildItem -Path dist -Filter 'nvJitLink*.dll' -File)) {
             throw 'Missing CUDA release dependency: nvJitLink*.dll'
           }
-          $oldPath = $env:PATH
-          try {
-            $env:PATH = "$((Resolve-Path dist).Path);$env:SystemRoot\System32;$env:SystemRoot"
-            $server = Start-Process -FilePath (Resolve-Path dist\llama-server.exe).Path -ArgumentList '--version' -PassThru -NoNewWindow
-            if (-not $server.WaitForExit(20000)) {
-              $server.Kill()
-              throw 'Packaged CUDA server timed out during --version'
+          # Include transitive imports too; cuBLAS and nvJitLink may load other CUDA DLLs.
+          $msvcTools = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC'
+          $dumpbin = Get-ChildItem $msvcTools -Filter dumpbin.exe -File -Recurse |
+            Where-Object { $_.FullName -match 'Hostx64\\x64\\dumpbin\.exe$' } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw 'MSVC dumpbin.exe not found; cannot verify CUDA DLL dependencies' }
+          $pending = [System.Collections.Generic.Queue[string]]::new()
+          Get-ChildItem dist -File | Where-Object { $_.Extension -ieq '.dll' -or $_.Extension -ieq '.exe' } |
+            ForEach-Object { $pending.Enqueue($_.FullName) }
+          $checked = @{}
+          $missing = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+          $needsNvidiaDriver = $false
+          while ($pending.Count -gt 0) {
+            $binary = $pending.Dequeue()
+            if ($checked.ContainsKey($binary)) { continue }
+            $checked[$binary] = $true
+            $imports = & $dumpbin.FullName /dependents $binary
+            if ($LASTEXITCODE -ne 0) { throw "Cannot inspect DLL imports: $binary" }
+            foreach ($line in $imports) {
+              if ($line -notmatch '^\s*([A-Za-z0-9_.-]+\.dll)\s*$') { continue }
+              $name = $Matches[1]
+              if ($name -ieq 'nvcuda.dll') {
+                $needsNvidiaDriver = $true
+                continue  # Supplied by the GPU driver on the destination PC, never redistributed.
+              }
+              if ($name -match '^(api-ms-|ext-ms-)') { continue }
+              $local = Join-Path $dst $name
+              if (Test-Path $local) { continue }
+              if (Test-Path (Join-Path "$env:SystemRoot\System32" $name)) { continue }
+              $source = $cudaDirs | ForEach-Object { Join-Path $_ $name } |
+                Where-Object { Test-Path $_ } | Select-Object -First 1
+              if ($source) {
+                Copy-Item -LiteralPath $source -Destination $local
+                Write-Host "Bundled transitive CUDA dependency: $name"
+                $pending.Enqueue((Resolve-Path $local).Path)
+              } else {
+                [void] $missing.Add($name)
+              }
             }
-            if ($server.ExitCode -ne 0) { throw "Packaged CUDA server exited with $($server.ExitCode) during --version" }
-          } finally {
-            $env:PATH = $oldPath
+          }
+          if ($missing.Count) { throw "Unresolved Windows DLL imports: $($missing -join ', ')" }
+          if ($needsNvidiaDriver -and -not (Test-Path "$env:SystemRoot\System32\nvcuda.dll")) {
+            Write-Host 'Static imports verified. Skipping CUDA --version: this runner has no NVIDIA driver (nvcuda.dll).'
+          } else {
+            $oldPath = $env:PATH
+            try {
+              $env:PATH = "$((Resolve-Path dist).Path);$env:SystemRoot\System32;$env:SystemRoot"
+              $server = Start-Process -FilePath (Resolve-Path dist\llama-server.exe).Path -ArgumentList '--version' -PassThru -NoNewWindow
+              if (-not $server.WaitForExit(20000)) {
+                $server.Kill()
+                throw 'Packaged CUDA server timed out during --version'
+              }
+              if ($server.ExitCode -ne 0) { throw "Packaged CUDA server exited with $($server.ExitCode) during --version" }
+            } finally {
+              $env:PATH = $oldPath
+            }
           }
           Compress-Archive -Path dist\* -DestinationPath "llama-server-$env:ARTIFACT_TAG-windows-x64-cuda12.4.zip"
 
