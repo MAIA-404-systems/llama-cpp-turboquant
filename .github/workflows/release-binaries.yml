@@ -120,21 +120,27 @@ jobs:
             }
           }
           if ($missing.Count) { throw "Unresolved Windows DLL imports: $($missing -join ', ')" }
-          if ($needsNvidiaDriver -and -not (Test-Path "$env:SystemRoot\System32\nvcuda.dll")) {
-            Write-Host 'Static imports verified. Skipping CUDA --version: this runner has no NVIDIA driver (nvcuda.dll).'
-          } else {
-            $oldPath = $env:PATH
-            try {
-              $env:PATH = "$((Resolve-Path dist).Path);$env:SystemRoot\System32;$env:SystemRoot"
-              $server = Start-Process -FilePath (Resolve-Path dist\llama-server.exe).Path -ArgumentList '--version' -PassThru -NoNewWindow
-              if (-not $server.WaitForExit(20000)) {
-                $server.Kill()
-                throw 'Packaged CUDA server timed out during --version'
-              }
-              if ($server.ExitCode -ne 0) { throw "Packaged CUDA server exited with $($server.ExitCode) during --version" }
-            } finally {
-              $env:PATH = $oldPath
+          $hasNvidiaDriver = Test-Path "$env:SystemRoot\System32\nvcuda.dll"
+          $oldPath = $env:PATH
+          try {
+            $env:PATH = "$((Resolve-Path dist).Path);$env:SystemRoot\System32;$env:SystemRoot"
+            $server = Start-Process -FilePath (Resolve-Path dist\llama-server.exe).Path -ArgumentList '--version' -PassThru -NoNewWindow
+            if (-not $server.WaitForExit(20000)) {
+              $server.Kill()
+              throw 'Packaged CUDA server timed out during --version'
             }
+            if ($server.ExitCode -ne 0) {
+              # GitHub-hosted Windows runners have no NVIDIA driver. The loader
+              # therefore cannot resolve nvcuda.dll; static import validation
+              # above already verified every redistributable CUDA DLL.
+              if ($needsNvidiaDriver -and -not $hasNvidiaDriver -and $server.ExitCode -eq -1073741515) {
+                Write-Host 'CUDA --version attempted; expected driverless failure (nvcuda.dll is not installed on this runner).'
+              } else {
+                throw "Packaged CUDA server exited with $($server.ExitCode) during --version"
+              }
+            }
+          } finally {
+            $env:PATH = $oldPath
           }
           Compress-Archive -Path dist\* -DestinationPath "llama-server-$env:ARTIFACT_TAG-windows-x64-cuda12.4.zip"
 
