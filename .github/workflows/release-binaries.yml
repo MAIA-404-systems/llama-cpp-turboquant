@@ -20,6 +20,8 @@ permissions:
 env:
   CMAKE_COMMON_ARGS: "-DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_BORINGSSL=ON"
   VULKAN_VERSION_WIN: "1.4.357.0"
+  OPENVINO_VERSION_MAJOR: "2026.0"
+  OPENVINO_VERSION_FULL: "2026.0.0.20965.c6d6a13a886"
   RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
   ARTIFACT_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || github.sha }}
 
@@ -222,6 +224,288 @@ jobs:
           name: windows-x64-cpu
           path: llama-server-${{ env.ARTIFACT_TAG }}-windows-x64-cpu.zip
 
+  windows-openvino:
+    name: Build Windows OpenVINO (Intel NPU)
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: choco install ninja
+
+      - name: Install OpenCL Headers and Libs
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git $env:RUNNER_TEMP/OpenCL-Headers
+          cmake -S $env:RUNNER_TEMP/OpenCL-Headers -B $env:RUNNER_TEMP/OpenCL-Headers/build `
+            -DBUILD_TESTING=OFF `
+            -DOPENCL_HEADERS_BUILD_TESTING=OFF `
+            -DOPENCL_HEADERS_BUILD_CXX_TESTS=OFF `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl"
+          cmake --build $env:RUNNER_TEMP/OpenCL-Headers/build --target install
+
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-ICD-Loader.git $env:RUNNER_TEMP/OpenCL-ICD-Loader
+          cmake -S $env:RUNNER_TEMP/OpenCL-ICD-Loader -B $env:RUNNER_TEMP/OpenCL-ICD-Loader/build `
+            -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl" `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl"
+          cmake --build $env:RUNNER_TEMP/OpenCL-ICD-Loader/build --target install --config Release
+
+      - name: Setup OpenVINO Toolkit
+        shell: pwsh
+        run: |
+          $ovUrl = "https://storage.openvinotoolkit.org/repositories/openvino/packages/${env:OPENVINO_VERSION_MAJOR}/windows/openvino_toolkit_windows_${env:OPENVINO_VERSION_FULL}_x86_64.zip"
+          curl.exe -L -o "$env:RUNNER_TEMP\openvino.zip" $ovUrl
+          Expand-Archive -Path "$env:RUNNER_TEMP\openvino.zip" -DestinationPath "$env:RUNNER_TEMP\ov_extracted"
+          $extractedDir = Get-ChildItem "$env:RUNNER_TEMP\ov_extracted" -Directory | Select-Object -First 1
+          Move-Item $extractedDir.FullName "C:\openvino"
+
+      - name: Build with CMake
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          call "C:\openvino\setupvars.bat"
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DBUILD_SHARED_LIBS=OFF ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_OPENVINO=ON ^
+            -DCMAKE_PREFIX_PATH="%RUNNER_TEMP%\opencl" ^
+            ${{ env.CMAKE_COMMON_ARGS }}
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      - name: Package Windows OpenVINO Binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist
+          Copy-Item build\bin\Release\llama-server.exe dist\
+          Get-ChildItem build\bin\Release -Filter *.dll -File | Copy-Item -Destination dist\
+          Get-ChildItem -Path "C:\openvino\runtime\bin\intel64\Release" -Filter *.dll -File -Recurse | Copy-Item -Destination dist\
+          Get-ChildItem -Path "C:\openvino\runtime\3rdparty\tbb\bin" -Filter *.dll -File -Recurse | Copy-Item -Destination dist\
+          & .\dist\llama-server.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "Packaged OpenVINO server exited with $LASTEXITCODE" }
+          Compress-Archive -Path dist\* -DestinationPath "llama-server-${env:ARTIFACT_TAG}-windows-x64-openvino.zip"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-openvino
+          path: llama-server-${{ env.ARTIFACT_TAG }}-windows-x64-openvino.zip
+
+  windows-vulkan-openvino:
+    name: Build Windows Vulkan + OpenVINO (GPU + NPU)
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          curl.exe -o $env:RUNNER_TEMP\VulkanSDK-Installer.exe -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION_WIN}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION_WIN}.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+          $vkPath = "C:\VulkanSDK\${env:VULKAN_VERSION_WIN}"
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=$vkPath"
+          Add-Content $env:GITHUB_PATH "$vkPath\bin"
+          Write-Host "Configured VULKAN_SDK=$vkPath"
+
+      - name: Install Ninja
+        run: choco install ninja
+
+      - name: Install OpenCL Headers and Libs
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git $env:RUNNER_TEMP/OpenCL-Headers
+          cmake -S $env:RUNNER_TEMP/OpenCL-Headers -B $env:RUNNER_TEMP/OpenCL-Headers/build `
+            -DBUILD_TESTING=OFF `
+            -DOPENCL_HEADERS_BUILD_TESTING=OFF `
+            -DOPENCL_HEADERS_BUILD_CXX_TESTS=OFF `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl"
+          cmake --build $env:RUNNER_TEMP/OpenCL-Headers/build --target install
+
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-ICD-Loader.git $env:RUNNER_TEMP/OpenCL-ICD-Loader
+          cmake -S $env:RUNNER_TEMP/OpenCL-ICD-Loader -B $env:RUNNER_TEMP/OpenCL-ICD-Loader/build `
+            -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl" `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl"
+          cmake --build $env:RUNNER_TEMP/OpenCL-ICD-Loader/build --target install --config Release
+
+      - name: Setup OpenVINO Toolkit
+        shell: pwsh
+        run: |
+          $ovUrl = "https://storage.openvinotoolkit.org/repositories/openvino/packages/${env:OPENVINO_VERSION_MAJOR}/windows/openvino_toolkit_windows_${env:OPENVINO_VERSION_FULL}_x86_64.zip"
+          curl.exe -L -o "$env:RUNNER_TEMP\openvino.zip" $ovUrl
+          Expand-Archive -Path "$env:RUNNER_TEMP\openvino.zip" -DestinationPath "$env:RUNNER_TEMP\ov_extracted"
+          $extractedDir = Get-ChildItem "$env:RUNNER_TEMP\ov_extracted" -Directory | Select-Object -First 1
+          Move-Item $extractedDir.FullName "C:\openvino"
+
+      - name: Build with CMake
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          call "C:\openvino\setupvars.bat"
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DBUILD_SHARED_LIBS=OFF ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_VULKAN=ON ^
+            -DGGML_OPENVINO=ON ^
+            -DCMAKE_PREFIX_PATH="%RUNNER_TEMP%\opencl" ^
+            ${{ env.CMAKE_COMMON_ARGS }}
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      - name: Package Windows Vulkan+OpenVINO Binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist
+          Copy-Item build\bin\Release\llama-server.exe dist\
+          Get-ChildItem build\bin\Release -Filter *.dll -File | Copy-Item -Destination dist\
+          Get-ChildItem -Path "C:\openvino\runtime\bin\intel64\Release" -Filter *.dll -File -Recurse | Copy-Item -Destination dist\
+          Get-ChildItem -Path "C:\openvino\runtime\3rdparty\tbb\bin" -Filter *.dll -File -Recurse | Copy-Item -Destination dist\
+          & .\dist\llama-server.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Vulkan+OpenVINO server exited with $LASTEXITCODE" }
+          Compress-Archive -Path dist\* -DestinationPath "llama-server-${env:ARTIFACT_TAG}-windows-x64-vulkan-openvino.zip"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-vulkan-openvino
+          path: llama-server-${{ env.ARTIFACT_TAG }}-windows-x64-vulkan-openvino.zip
+
+  windows-cuda-openvino:
+    name: Build Windows CUDA + OpenVINO (GPU + NPU)
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit 12.4
+        uses: ./.github/actions/windows-setup-cuda
+        with:
+          cuda_version: '12.4'
+
+      - name: Install Ninja
+        run: choco install ninja
+
+      - name: Install OpenCL Headers and Libs
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git $env:RUNNER_TEMP/OpenCL-Headers
+          cmake -S $env:RUNNER_TEMP/OpenCL-Headers -B $env:RUNNER_TEMP/OpenCL-Headers/build `
+            -DBUILD_TESTING=OFF `
+            -DOPENCL_HEADERS_BUILD_TESTING=OFF `
+            -DOPENCL_HEADERS_BUILD_CXX_TESTS=OFF `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl"
+          cmake --build $env:RUNNER_TEMP/OpenCL-Headers/build --target install
+
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-ICD-Loader.git $env:RUNNER_TEMP/OpenCL-ICD-Loader
+          cmake -S $env:RUNNER_TEMP/OpenCL-ICD-Loader -B $env:RUNNER_TEMP/OpenCL-ICD-Loader/build `
+            -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl" `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl"
+          cmake --build $env:RUNNER_TEMP/OpenCL-ICD-Loader/build --target install --config Release
+
+      - name: Setup OpenVINO Toolkit
+        shell: pwsh
+        run: |
+          $ovUrl = "https://storage.openvinotoolkit.org/repositories/openvino/packages/${env:OPENVINO_VERSION_MAJOR}/windows/openvino_toolkit_windows_${env:OPENVINO_VERSION_FULL}_x86_64.zip"
+          curl.exe -L -o "$env:RUNNER_TEMP\openvino.zip" $ovUrl
+          Expand-Archive -Path "$env:RUNNER_TEMP\openvino.zip" -DestinationPath "$env:RUNNER_TEMP\ov_extracted"
+          $extractedDir = Get-ChildItem "$env:RUNNER_TEMP\ov_extracted" -Directory | Select-Object -First 1
+          Move-Item $extractedDir.FullName "C:\openvino"
+
+      - name: Build with CMake
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          call "C:\openvino\setupvars.bat"
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DBUILD_SHARED_LIBS=OFF ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_CUDA=ON ^
+            -DGGML_CUDA_FA_ALL_QUANTS=ON ^
+            -DGGML_CUDA_CUB_3DOT2=ON ^
+            -DGGML_OPENVINO=ON ^
+            -DCMAKE_PREFIX_PATH="%RUNNER_TEMP%\opencl" ^
+            -DCMAKE_CUDA_FLAGS="-Xcudafe --diag_suppress=221" ^
+            ${{ env.CMAKE_COMMON_ARGS }}
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      - name: Package Windows CUDA+OpenVINO Binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist
+          Copy-Item build\bin\Release\llama-server.exe dist\
+          Get-ChildItem build\bin\Release -Filter *.dll -File | Copy-Item -Destination dist\
+          Get-ChildItem -Path "C:\openvino\runtime\bin\intel64\Release" -Filter *.dll -File -Recurse | Copy-Item -Destination dist\
+          Get-ChildItem -Path "C:\openvino\runtime\3rdparty\tbb\bin" -Filter *.dll -File -Recurse | Copy-Item -Destination dist\
+          $dst = '.\dist\'
+          $cudaDirs = @("$env:CUDA_PATH\bin", "$env:CUDA_PATH\lib", "$env:CUDA_PATH\bin\x64", "$env:CUDA_PATH\lib\x64")
+          foreach ($dir in $cudaDirs) {
+            if (Test-Path $dir) {
+              robocopy $dir $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll nvJitLink*.dll nvrtc*.dll nvfatbin*.dll
+              if ($LASTEXITCODE -gt 7) { throw "CUDA DLL copy failed from $dir (robocopy exit $LASTEXITCODE)" }
+              $global:LASTEXITCODE = 0
+            }
+          }
+          Remove-Item -Path dist\*.log -ErrorAction SilentlyContinue
+          foreach ($name in @('llama-server.exe', 'cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll')) {
+            if (-not (Test-Path (Join-Path dist $name))) { throw "Missing CUDA release dependency: $name" }
+          }
+          if (-not (Get-ChildItem -Path dist -Filter 'nvJitLink*.dll' -File)) {
+            throw 'Missing CUDA release dependency: nvJitLink*.dll'
+          }
+          $msvcTools = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC'
+          $dumpbin = Get-ChildItem $msvcTools -Filter dumpbin.exe -File -Recurse |
+            Where-Object { $_.FullName -match 'Hostx64\\x64\\dumpbin\.exe$' } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw 'MSVC dumpbin.exe not found; cannot verify CUDA DLL dependencies' }
+          $pending = [System.Collections.Generic.Queue[string]]::new()
+          Get-ChildItem dist -File | Where-Object { $_.Extension -ieq '.dll' -or $_.Extension -ieq '.exe' } |
+            ForEach-Object { $pending.Enqueue($_.FullName) }
+          $checked = @{}
+          $missing = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+          while ($pending.Count -gt 0) {
+            $binary = $pending.Dequeue()
+            if ($checked.ContainsKey($binary)) { continue }
+            $checked[$binary] = $true
+            $imports = & $dumpbin.FullName /dependents $binary
+            if ($LASTEXITCODE -ne 0) { throw "Cannot inspect DLL imports: $binary" }
+            foreach ($line in $imports) {
+              if ($line -notmatch '^\s*([A-Za-z0-9_.-]+\.dll)\s*$') { continue }
+              $name = $Matches[1]
+              if ($name -ieq 'nvcuda.dll') {
+                continue
+              }
+              if ($name -match '^(api-ms-|ext-ms-)') { continue }
+              $local = Join-Path $dst $name
+              if (Test-Path $local) { continue }
+              if (Test-Path (Join-Path "$env:SystemRoot\System32" $name)) { continue }
+              $source = $cudaDirs | ForEach-Object { Join-Path $_ $name } |
+                Where-Object { Test-Path $_ } | Select-Object -First 1
+              if ($source) {
+                Copy-Item -LiteralPath $source -Destination $local
+                Write-Host "Bundled transitive dependency: $name"
+                $pending.Enqueue((Resolve-Path $local).Path)
+              } else {
+                [void] $missing.Add($name)
+              }
+            }
+          }
+          if ($missing.Count) { throw "Unresolved Windows DLL imports: $($missing -join ', ')" }
+          Compress-Archive -Path dist\* -DestinationPath "llama-server-${env:ARTIFACT_TAG}-windows-x64-cuda12.4-openvino.zip"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-cuda-openvino
+          path: llama-server-${{ env.ARTIFACT_TAG }}-windows-x64-cuda12.4-openvino.zip
+
   linux-cuda:
     name: Build Linux CUDA
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -366,6 +650,122 @@ jobs:
           name: linux-x64-cpu
           path: llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-cpu.tar.gz
 
+  linux-openvino:
+    name: Build Linux OpenVINO (Intel NPU)
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libtbb12 cmake ninja-build python3-pip
+          sudo apt-get install -y ocl-icd-opencl-dev opencl-headers opencl-clhpp-headers intel-opencl-icd
+
+      - name: Setup OpenVINO Toolkit
+        uses: ./.github/actions/linux-setup-openvino
+        with:
+          path: ./openvino_toolkit
+          version_major: ${{ env.OPENVINO_VERSION_MAJOR }}
+          version_full: ${{ env.OPENVINO_VERSION_FULL }}
+
+      - name: Install OpenVINO dependencies
+        run: |
+          cd ./openvino_toolkit
+          chmod +x ./install_dependencies/install_openvino_dependencies.sh
+          echo "Y" | sudo -E ./install_dependencies/install_openvino_dependencies.sh
+
+      - name: Build with CMake
+        run: |
+          source ./openvino_toolkit/setupvars.sh
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_OPENVINO=ON \
+            ${{ env.CMAKE_COMMON_ARGS }}
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Package Linux OpenVINO Binary
+        run: |
+          mkdir -p dist
+          cp build/bin/llama-server dist/
+          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \\;
+          find ./openvino_toolkit/runtime/lib/intel64/ -name '*.so*' -exec cp -a {} dist/ \\;
+          find ./openvino_toolkit/runtime/3rdparty/ -name '*.so*' -exec cp -a {} dist/ \\;
+          env LD_LIBRARY_PATH=./dist ./dist/llama-server --version
+          tar -czvf llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-openvino.tar.gz -C dist .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-openvino
+          path: llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-openvino.tar.gz
+
+  linux-vulkan-openvino:
+    name: Build Linux Vulkan + OpenVINO (GPU + NPU)
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential libssl-dev libtbb12 cmake ninja-build python3-pip
+          sudo apt-get install -y ocl-icd-opencl-dev opencl-headers opencl-clhpp-headers intel-opencl-icd
+          sudo apt-get install -y libvulkan-dev glslang-tools shaderc
+
+      - name: Setup OpenVINO Toolkit
+        uses: ./.github/actions/linux-setup-openvino
+        with:
+          path: ./openvino_toolkit
+          version_major: ${{ env.OPENVINO_VERSION_MAJOR }}
+          version_full: ${{ env.OPENVINO_VERSION_FULL }}
+
+      - name: Install OpenVINO dependencies
+        run: |
+          cd ./openvino_toolkit
+          chmod +x ./install_dependencies/install_openvino_dependencies.sh
+          echo "Y" | sudo -E ./install_dependencies/install_openvino_dependencies.sh
+
+      - name: Build with CMake
+        run: |
+          source ./openvino_toolkit/setupvars.sh
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_VULKAN=ON \
+            -DGGML_OPENVINO=ON \
+            ${{ env.CMAKE_COMMON_ARGS }}
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Package Linux Vulkan+OpenVINO Binary
+        run: |
+          mkdir -p dist
+          cp build/bin/llama-server dist/
+          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \\;
+          find ./openvino_toolkit/runtime/lib/intel64/ -name '*.so*' -exec cp -a {} dist/ \\;
+          find ./openvino_toolkit/runtime/3rdparty/ -name '*.so*' -exec cp -a {} dist/ \\;
+          env LD_LIBRARY_PATH=./dist ./dist/llama-server --version
+          tar -czvf llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-vulkan-openvino.tar.gz -C dist .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-vulkan-openvino
+          path: llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-vulkan-openvino.tar.gz
+
   macos-metal:
     name: Build macOS Metal
     if: github.event_name == 'push' && github.ref_type == 'tag'
@@ -446,9 +846,14 @@ jobs:
       - windows-cuda
       - windows-vulkan
       - windows-cpu
+      - windows-openvino
+      - windows-vulkan-openvino
+      - windows-cuda-openvino
       - linux-cuda
       - linux-vulkan
       - linux-cpu
+      - linux-openvino
+      - linux-vulkan-openvino
       - macos-metal
       - macos-vulkan
     runs-on: ubuntu-latest
