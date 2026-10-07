@@ -247,6 +247,9 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl"
           cmake --build $env:RUNNER_TEMP/OpenCL-Headers/build --target install
 
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-CLHPP.git $env:RUNNER_TEMP/OpenCL-CLHPP
+          Copy-Item "$env:RUNNER_TEMP/OpenCL-CLHPP/include/CL/*" "$env:RUNNER_TEMP/opencl/include/CL/"
+
           git clone --depth 1 https://github.com/KhronosGroup/OpenCL-ICD-Loader.git $env:RUNNER_TEMP/OpenCL-ICD-Loader
           cmake -S $env:RUNNER_TEMP/OpenCL-ICD-Loader -B $env:RUNNER_TEMP/OpenCL-ICD-Loader/build `
             -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl" `
@@ -327,6 +330,9 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl"
           cmake --build $env:RUNNER_TEMP/OpenCL-Headers/build --target install
 
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-CLHPP.git $env:RUNNER_TEMP/OpenCL-CLHPP
+          Copy-Item "$env:RUNNER_TEMP/OpenCL-CLHPP/include/CL/*" "$env:RUNNER_TEMP/opencl/include/CL/"
+
           git clone --depth 1 https://github.com/KhronosGroup/OpenCL-ICD-Loader.git $env:RUNNER_TEMP/OpenCL-ICD-Loader
           cmake -S $env:RUNNER_TEMP/OpenCL-ICD-Loader -B $env:RUNNER_TEMP/OpenCL-ICD-Loader/build `
             -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl" `
@@ -402,6 +408,9 @@ jobs:
             -DOPENCL_HEADERS_BUILD_CXX_TESTS=OFF `
             -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl"
           cmake --build $env:RUNNER_TEMP/OpenCL-Headers/build --target install
+
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-CLHPP.git $env:RUNNER_TEMP/OpenCL-CLHPP
+          Copy-Item "$env:RUNNER_TEMP/OpenCL-CLHPP/include/CL/*" "$env:RUNNER_TEMP/opencl/include/CL/"
 
           git clone --depth 1 https://github.com/KhronosGroup/OpenCL-ICD-Loader.git $env:RUNNER_TEMP/OpenCL-ICD-Loader
           cmake -S $env:RUNNER_TEMP/OpenCL-ICD-Loader -B $env:RUNNER_TEMP/OpenCL-ICD-Loader/build `
@@ -544,7 +553,7 @@ jobs:
         run: |
           mkdir -p dist
           cp build/bin/llama-server dist/
-          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \;
+          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ ';'
           cuda_root=$(realpath "$CUDA_PATH")
           for name in libcudart.so.12 libcublas.so.12 libcublasLt.so.12; do
             source=$(find "$cuda_root" -path '*/stubs' -prune -o -name "$name" -print -quit)
@@ -598,7 +607,7 @@ jobs:
         run: |
           mkdir -p dist
           cp build/bin/llama-server dist/
-          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \;
+          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ ';'
           env -u LD_LIBRARY_PATH ./dist/llama-server --version
           env -u LD_LIBRARY_PATH ./dist/llama-server --list-devices
           tar -czvf llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-vulkan.tar.gz -C dist .
@@ -639,7 +648,7 @@ jobs:
         run: |
           mkdir -p dist
           cp build/bin/llama-server dist/
-          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \;
+          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ ';'
           env -u LD_LIBRARY_PATH ./dist/llama-server --version
           env -u LD_LIBRARY_PATH ./dist/llama-server --list-devices
           tar -czvf llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-cpu.tar.gz -C dist .
@@ -695,9 +704,9 @@ jobs:
         run: |
           mkdir -p dist
           cp build/bin/llama-server dist/
-          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \\;
-          find ./openvino_toolkit/runtime/lib/intel64/ -name '*.so*' -exec cp -a {} dist/ \\;
-          find ./openvino_toolkit/runtime/3rdparty/ -name '*.so*' -exec cp -a {} dist/ \\;
+          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ ';'
+          find ./openvino_toolkit/runtime/lib/intel64/ -name '*.so*' -exec cp -a {} dist/ ';'
+          find ./openvino_toolkit/runtime/3rdparty/ -name '*.so*' -exec cp -a {} dist/ ';'
           env LD_LIBRARY_PATH=./dist ./dist/llama-server --version
           tar -czvf llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-openvino.tar.gz -C dist .
 
@@ -721,7 +730,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y build-essential libssl-dev libtbb12 cmake ninja-build python3-pip
           sudo apt-get install -y ocl-icd-opencl-dev opencl-headers opencl-clhpp-headers intel-opencl-icd
-          sudo apt-get install -y libvulkan-dev glslang-tools shaderc
+          sudo apt-get install -y glslc libvulkan-dev spirv-headers
 
       - name: Setup OpenVINO Toolkit
         uses: ./.github/actions/linux-setup-openvino
@@ -754,9 +763,9 @@ jobs:
         run: |
           mkdir -p dist
           cp build/bin/llama-server dist/
-          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ \\;
-          find ./openvino_toolkit/runtime/lib/intel64/ -name '*.so*' -exec cp -a {} dist/ \\;
-          find ./openvino_toolkit/runtime/3rdparty/ -name '*.so*' -exec cp -a {} dist/ \\;
+          find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} dist/ ';'
+          find ./openvino_toolkit/runtime/lib/intel64/ -name '*.so*' -exec cp -a {} dist/ ';'
+          find ./openvino_toolkit/runtime/3rdparty/ -name '*.so*' -exec cp -a {} dist/ ';'
           env LD_LIBRARY_PATH=./dist ./dist/llama-server --version
           tar -czvf llama-server-${{ env.ARTIFACT_TAG }}-linux-x64-vulkan-openvino.tar.gz -C dist .
 
